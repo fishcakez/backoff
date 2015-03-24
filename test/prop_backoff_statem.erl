@@ -7,13 +7,13 @@
 -export([next_state/3]).
 -export([postcondition/3]).
 
--record(state, {backoff, type=normal, delay, start, max}).
+-record(state, {backoff, type=normal, delay, failures=0, start, max}).
 
 init_args() ->
     ?SUCHTHAT([X,Y], [pos_integer(), oneof([pos_integer(), infinity])],
               X < Y).
 type() ->
-    elements([normal, jitter, decorrelated_jitter]).
+    elements([normal, jitter, decorrelated_jitter, full_jitter]).
 
 initial_state() ->
     #state{}.
@@ -35,11 +35,11 @@ next_state(State, B, {call, _, init, [Start, Max]}) ->
     State#state{backoff=B, delay= Start, start=Start, max=Max};
 next_state(#state{start=Start} = State, Value, {call, _, succeed, _}) ->
     NewB = {call, erlang, element, [2, Value]},
-    State#state{backoff=NewB, delay=Start};
-next_state(State, Value, {call, _, fail, _}) ->
+    State#state{backoff=NewB, delay=Start, failures=0};
+next_state(#state{failures=N} = State, Value, {call, _, fail, _}) ->
     NewDelay = {call, erlang, element, [1, Value]},
     NewB = {call, erlang, element, [2, Value]},
-    State#state{backoff=NewB, delay=NewDelay};
+    State#state{backoff=NewB, delay=NewDelay, failures=N+1};
 next_state(State, NewB, {call, _, type, [_, Type]}) ->
     State#state{backoff=NewB, type=Type};
 next_state(State, _, {call, _, get, _}) ->
@@ -50,6 +50,10 @@ postcondition(#state{start=Start}, {call, _, succeed, _}, {NewDelay, _}) ->
 postcondition(#state{type=decorrelated_jitter, delay=Delay, start=Start, max=Max},
               {call, _, fail, _}, {NewDelay, _}) ->
     Delay * 3 >= NewDelay andalso NewDelay >= Start andalso NewDelay =< Max;
+postcondition(#state{type=full_jitter, failures=N, start=Start, max=Max},
+              {call, _, fail, _}, {NewDelay, _}) ->
+    (Start * (2 bsl N)) >= NewDelay andalso NewDelay >= Start andalso
+    NewDelay =< Max;
 postcondition(#state{delay=Delay, max=Max}, {call, _, fail, _},
               {NewDelay, _}) ->
     (NewDelay > Delay andalso NewDelay =< Max) orelse

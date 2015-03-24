@@ -8,12 +8,13 @@
 -record(backoff, {start :: pos_integer(),
                   max :: pos_integer() | infinity,
                   current :: pos_integer(),
-                  type=normal :: normal | jitter | decorrelated_jitter,
+                  failures=0 :: non_neg_integer(),
+                  type=normal :: normal | jitter | decorrelated_jitter | full_jitter,
                   value :: term(),
                   dest :: pid()}).
 
 -opaque backoff() :: #backoff{}.
--type type() :: normal | jitter | decorrelated_jitter.
+-type type() :: normal | jitter | decorrelated_jitter | full_jitter.
 
 -export_type([backoff/0, type/0]).
 
@@ -74,35 +75,45 @@ get(#backoff{current=Delay}) -> Delay.
 
 %% Swaps between the states of the backoff.
 -spec type(backoff(), type()) -> backoff().
-type(#backoff{}=B, Type) when Type =:= jitter; Type =:= decorrelated_jitter ->
+type(#backoff{}=B, Type)
+  when Type =:= jitter; Type =:= decorrelated_jitter; Type =:= full_jitter ->
     maybe_seed(),
     B#backoff{type=Type};
 type(#backoff{}=B, normal) ->
     B#backoff{type=normal}.
 
 -spec fail(backoff()) -> {New::pos_integer(), backoff()}.
-fail(B=#backoff{current=Delay, max=infinity, type=normal}) ->
+fail(B=#backoff{current=Delay, failures=N, max=infinity, type=normal}) ->
     NewDelay = increment(Delay),
-    {NewDelay, B#backoff{current=NewDelay}};
-fail(B=#backoff{current=Delay, max=Max, type=normal}) ->
+    {NewDelay, B#backoff{current=NewDelay, failures=N+1}};
+fail(B=#backoff{current=Delay, failures=N, max=Max, type=normal}) ->
     NewDelay = increment(Delay, Max),
-    {NewDelay, B#backoff{current=NewDelay}};
-fail(B=#backoff{current=Delay, max=infinity, type=jitter}) ->
+    {NewDelay, B#backoff{current=NewDelay, failures=N+1}};
+fail(B=#backoff{current=Delay, failures=N, max=infinity, type=jitter}) ->
     NewDelay = rand_increment(Delay),
-    {NewDelay, B#backoff{current=NewDelay}};
-fail(B=#backoff{current=Delay, max=Max, type=jitter}) ->
+    {NewDelay, B#backoff{current=NewDelay, failures=N+1}};
+fail(B=#backoff{current=Delay, failures=N, max=Max, type=jitter}) ->
     NewDelay = rand_increment(Delay, Max),
-    {NewDelay, B#backoff{current=NewDelay}};
+    {NewDelay, B#backoff{current=NewDelay, failures=N+1}};
 %% Decorrelated Jitter, see http://www.awsarchitectureblog.com/2015/03/backoff.html
-fail(B=#backoff{current=Delay, start=Start, max=Max, type=decorrelated_jitter}) ->
+fail(B=#backoff{current=Delay, failures=N, start=Start, max=Max,
+                type=decorrelated_jitter}) ->
     NextMax = round(Delay * get_env(decorrelated_multiplier, 3)),
     NewDelay = min(Max, rand_between(Start, NextMax)),
-    {NewDelay, B#backoff{current=NewDelay}}.
-
+    {NewDelay, B#backoff{current=NewDelay, failures=N+1}};
+%% Full Jitter, see http://www.awsarchitectureblog.com/2015/03/backoff.html
+fail(B=#backoff{failures=N, start=Start, max=Max, type=full_jitter}) ->
+    NextMax = min(Max, Start * (2 bsl N)),
+    %% Use Start as miniumum, instead of 0, so that the delay is always greater
+    %% than or equal to Start to match the behaviour of other types. Allowing a
+    %% lower delay can cause incorrect behaviour and/or crashes if the type is
+    %% changed.
+    NewDelay = rand_between(Start, NextMax),
+    {NewDelay, B#backoff{current=NewDelay, failures=N+1}}.
 
 -spec succeed(backoff()) -> {New::pos_integer(), backoff()}.
 succeed(B=#backoff{start=Start}) ->
-    {Start, B#backoff{current=Start}}.
+    {Start, B#backoff{current=Start, failures=0}}.
 
 maybe_seed() ->
     case erlang:get(random_seed) of
