@@ -8,7 +8,8 @@
 -record(backoff, {start :: pos_integer(),
                   max :: pos_integer() | infinity,
                   current :: pos_integer(),
-                  type=normal :: normal | jitter,
+                  failures=0 :: non_neg_integer(),
+                  type=normal :: normal | jitter | full_jitter | decorrelated_jitter,
                   value :: term(),
                   dest :: pid()}).
 
@@ -85,30 +86,41 @@ get(#backoff{current=Delay}) -> Delay.
 
 %% Swaps between the states of the backoff.
 -spec type(backoff(), normal | jitter) -> backoff().
-type(#backoff{}=B, jitter) ->
+type(#backoff{}=B, Jitter) when Jitter =:= jitter;
+                                Jitter =:= full_jitter;
+                                Jitter =:= decorrelated_jitter ->
     maybe_seed(),
-    B#backoff{type=jitter};
+    B#backoff{type=Jitter};
 type(#backoff{}=B, normal) ->
     B#backoff{type=normal}.
 
 -spec fail(backoff()) -> {New::pos_integer(), backoff()}.
-fail(B=#backoff{current=Delay, max=infinity, type=normal}) ->
+fail(B=#backoff{current=Delay, max=infinity, type=normal, failures=F}) ->
     NewDelay = increment(Delay),
-    {NewDelay, B#backoff{current=NewDelay}};
-fail(B=#backoff{current=Delay, max=Max, type=normal}) ->
+    {NewDelay, B#backoff{current=NewDelay, failures=F+1}};
+fail(B=#backoff{current=Delay, max=Max, type=normal, failures=F}) ->
     NewDelay = increment(Delay, Max),
-    {NewDelay, B#backoff{current=NewDelay}};
-fail(B=#backoff{current=Delay, max=infinity, type=jitter}) ->
+    {NewDelay, B#backoff{current=NewDelay, failures=F+1}};
+fail(B=#backoff{current=Delay, max=infinity, type=jitter, failures=F}) ->
     NewDelay = rand_increment(Delay),
-    {NewDelay, B#backoff{current=NewDelay}};
-fail(B=#backoff{current=Delay, max=Max, type=jitter}) ->
+    {NewDelay, B#backoff{current=NewDelay, failures=F+1}};
+fail(B=#backoff{current=Delay, max=Max, type=jitter, failures=F}) ->
     NewDelay = rand_increment(Delay, Max),
-    {NewDelay, B#backoff{current=NewDelay}}.
-
+    {NewDelay, B#backoff{current=NewDelay, failures=F+1}};
+%% Full Jitter, see http://www.awsarchitectureblog.com/2015/03/backoff.html
+fail(B=#backoff{start=Start, max=Max, type=full_jitter, failures=F}) ->
+    NextMax = min(Max, Start * (2 bsl F)),
+    NewDelay = rand_between(Start, NextMax),
+    {NewDelay, B#backoff{current=NewDelay, failures=F+1}};
+%% Decorrelated Jitter, see http://www.awsarchitectureblog.com/2015/03/backoff.html
+fail(B=#backoff{current=Current, start=Start, max=Max, type=decorrelated_jitter,
+                failures=F}) ->
+    NewDelay = min(Max, rand_between(Start, Current * 3)),
+    {NewDelay, B#backoff{current=NewDelay, failures=F+1}}.
 
 -spec succeed(backoff()) -> {New::pos_integer(), backoff()}.
 succeed(B=#backoff{start=Start}) ->
-    {Start, B#backoff{current=Start}}.
+    {Start, B#backoff{current=Start, failures=0}}.
 
 maybe_seed() ->
     case erlang:get(random_seed) of
@@ -116,3 +128,7 @@ maybe_seed() ->
         {X,X,X} -> random:seed(erlang:now());
         _ -> ok
     end.
+
+rand_between(From, To) ->
+    From2 = From - 1,
+    From2 + random:uniform(To - From2).

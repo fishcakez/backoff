@@ -13,7 +13,7 @@ init_args() ->
     ?SUCHTHAT([X,Y], [pos_integer(), oneof([pos_integer(), infinity])],
               X < Y).
 type() ->
-    elements([normal, jitter]).
+    elements([normal, jitter, full_jitter, decorrelated_jitter]).
 
 initial_state() ->
     #state{}.
@@ -55,7 +55,14 @@ postcondition(#state{type=jitter, delay=Delay, max=Max}, {call, _, fail, _},
               {NewDelay, _}) ->
     (NewDelay >= Delay orelse
      (Delay > Max div 3 andalso NewDelay >= 1 andalso NewDelay >= Max div 3))
-    andalso NewDelay =< Max;
+    andalso NewDelay =< Max andalso NewDelay =< Delay * 3;
+postcondition(#state{type=full_jitter, start=Start, max=Max, failures=N},
+              {call, _, fail, _}, {NewDelay, _}) ->
+    (Start * (2 bsl N)) >= NewDelay andalso NewDelay >= Start andalso
+    NewDelay =< Max;
+postcondition(#state{type=decorrelated_jitter, start=Start, delay=Delay, max=Max},
+              {call, _, fail, _}, {NewDelay, _}) ->
+    Delay * 3 >= NewDelay andalso NewDelay >= Start andalso NewDelay =< Max;
 postcondition(#state{delay=Delay}, {call, _, get, _}, Result) ->
     Result =:= Delay;
 postcondition(_, _, _) ->
